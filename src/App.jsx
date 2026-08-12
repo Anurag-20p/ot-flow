@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { createClient } from "@supabase/supabase-js";
+import { Html5QrcodeScanner } from "html5-qrcode";
 import {
   Activity, AlertTriangle, CheckCircle2, Clock, Package,
-  FileWarning, ShieldCheck, ChevronRight, X, Radio, RefreshCw, WifiOff, ScrollText,
+  FileWarning, ShieldCheck, ChevronRight, X, Radio, RefreshCw, WifiOff, ScrollText, QrCode, Camera,
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip, CartesianGrid } from "recharts";
 
@@ -26,10 +27,13 @@ const STAGE_COLOR = {
   Cleaning: "bg-sky-400",
 };
 
-const utilizationData = [
-  { day: "Mon", pct: 62 }, { day: "Tue", pct: 71 }, { day: "Wed", pct: 58 },
-  { day: "Thu", pct: 80 }, { day: "Fri", pct: 74 }, { day: "Sat", pct: 45 }, { day: "Sun", pct: 30 },
-];
+const CATEGORY_LABEL = {
+  stage: "Stage Changes",
+  consent: "Consent Signed",
+  warn: "Consent Alerts",
+  scan: "Pack Scans",
+  info: "Readiness Updates",
+};
 
 // ---- Small UI atoms ---------------------------------------------------
 
@@ -112,6 +116,52 @@ function OTBay({ room, pack, onAdvance, busy }) {
   );
 }
 
+// ---- QR Scanner modal (real webcam scanning via html5-qrcode) --------
+
+function QRScannerModal({ onScan, onClose }) {
+  useEffect(() => {
+    const scanner = new Html5QrcodeScanner(
+      "qr-reader",
+      { fps: 10, qrbox: 220 },
+      false
+    );
+    let active = true;
+    scanner.render(
+      (decodedText) => {
+        if (!active) return;
+        active = false;
+        scanner.clear().catch(() => {});
+        onScan(decodedText);
+      },
+      () => {} // ignore per-frame scan errors, they're normal while aiming the camera
+    );
+    return () => {
+      active = false;
+      scanner.clear().catch(() => {});
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+      <div className="bg-slate-900 border border-slate-800 rounded-lg p-4 max-w-sm w-full">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2 text-slate-100 font-medium text-sm">
+            <Camera size={15} className="text-teal-400" /> Scan Pack QR Code
+          </div>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-300">
+            <X size={18} />
+          </button>
+        </div>
+        <div id="qr-reader" className="rounded overflow-hidden" />
+        <p className="text-[11px] text-slate-500 mt-3">
+          Point the camera at a pack's QR code below to mark it received/sterile at point of use.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 // ---- Main app -----------------------------------------------------
 
 export default function App() {
@@ -124,6 +174,8 @@ export default function App() {
   const [syncing, setSyncing] = useState(false);
   const [lastSync, setLastSync] = useState(null);
   const [log, setLog] = useState([]);
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [scanMsg, setScanMsg] = useState(null);
 
   const loadAll = useCallback(async () => {
     const [roomsRes, patientsRes, packsRes] = await Promise.all([
@@ -150,7 +202,7 @@ export default function App() {
       .from("activity_log")
       .select("*")
       .order("created_at", { ascending: false })
-      .limit(25);
+      .limit(100);
     if (!error) setLog(data);
   }, []);
 
@@ -225,6 +277,28 @@ export default function App() {
     setSyncing(false);
   };
 
+  const handleScan = async (decodedText) => {
+    setScannerOpen(false);
+    const packId = decodedText.trim();
+    const pack = packs.find((p) => p.id === packId);
+    if (!pack) {
+      setScanMsg({ tone: "bad", text: `Scanned code "${packId}" doesn't match any known pack.` });
+      logActivity(`Unrecognized pack scan: "${packId}"`, "warn");
+      return;
+    }
+    const { error } = await supabase
+      .from("sterile_packs")
+      .update({ status: "sterile", in_use: true })
+      .eq("id", packId);
+    if (!error) {
+      setPacks((ps) => ps.map((p) => (p.id === packId ? { ...p, status: "sterile", in_use: true } : p)));
+      setScanMsg({ tone: "ok", text: `${packId} scanned and marked sterile / in use.` });
+      logActivity(`Pack ${packId} scanned at point of use — marked sterile`, "scan");
+    } else {
+      setScanMsg({ tone: "bad", text: `Failed to update ${packId}: ${error.message}` });
+    }
+  };
+
   const alerts = useMemo(() => {
     const out = [];
     rooms.forEach((r) => {
@@ -241,6 +315,16 @@ export default function App() {
   }, [rooms, patients, packById]);
 
   const utilNow = rooms.length ? Math.round((rooms.filter((r) => r.stage > 0 && r.stage < 4).length / rooms.length) * 100) : 0;
+
+  // Real chart, computed live from the activity_log table — no hardcoded numbers
+  const eventBreakdown = useMemo(() => {
+    const counts = {};
+    log.forEach((entry) => {
+      const label = CATEGORY_LABEL[entry.category] || "Other";
+      counts[label] = (counts[label] || 0) + 1;
+    });
+    return Object.entries(counts).map(([name, count]) => ({ name, count }));
+  }, [log]);
 
   if (loading) {
     return (
@@ -347,13 +431,31 @@ export default function App() {
           </section>
 
           <section>
-            <Eyebrow>CSSD Sterile Pack Tracking</Eyebrow>
-            <div className="bg-slate-900 border border-slate-800 rounded-lg divide-y divide-slate-800 mt-2">
+            <div className="flex items-center justify-between">
+              <Eyebrow>CSSD Sterile Pack Tracking</Eyebrow>
+              <button
+                onClick={() => { setScanMsg(null); setScannerOpen(true); }}
+                className="text-[11px] font-mono flex items-center gap-1 px-2 py-1 rounded border border-teal-400/30 text-teal-300 hover:bg-teal-400/10 transition-colors mb-1"
+              >
+                <Camera size={12} /> Scan Pack
+              </button>
+            </div>
+            {scanMsg && (
+              <div className={`text-[11px] rounded px-2 py-1.5 mb-2 border ${scanMsg.tone === "ok" ? "bg-teal-400/10 text-teal-300 border-teal-400/30" : "bg-rose-500/10 text-rose-300 border-rose-500/30"}`}>
+                {scanMsg.text}
+              </div>
+            )}
+            <div className="bg-slate-900 border border-slate-800 rounded-lg divide-y divide-slate-800">
               {packs.map((p) => (
-                <div key={p.id} className="flex items-center justify-between px-4 py-3">
-                  <div>
+                <div key={p.id} className="flex items-center justify-between px-4 py-3 gap-3">
+                  <img
+                    src={`https://api.qrserver.com/v1/create-qr-code/?size=44x44&margin=0&data=${encodeURIComponent(p.id)}`}
+                    alt={`QR ${p.id}`}
+                    className="w-9 h-9 rounded bg-white p-0.5 shrink-0"
+                  />
+                  <div className="flex-1 min-w-0">
                     <div className="text-sm font-medium text-slate-100 flex items-center gap-2">
-                      <Package size={13} className="text-slate-500" /> {p.id}
+                      <Package size={13} className="text-slate-500 shrink-0" /> {p.id}
                     </div>
                     <div className="text-[11px] font-mono text-slate-500">{p.type} · {p.cycles_left} cycles left</div>
                   </div>
@@ -367,6 +469,7 @@ export default function App() {
               ))}
             </div>
           </section>
+          {scannerOpen && <QRScannerModal onScan={handleScan} onClose={() => setScannerOpen(false)} />}
         </div>
 
         <div className="grid lg:grid-cols-2 gap-8">
@@ -389,17 +492,23 @@ export default function App() {
           </section>
 
           <section>
-            <Eyebrow>Weekly OT Utilization</Eyebrow>
+            <Eyebrow>Workflow Events — Live (from Activity Log)</Eyebrow>
             <div className="bg-slate-900 border border-slate-800 rounded-lg mt-2 p-4 h-64">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={utilizationData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
-                  <XAxis dataKey="day" stroke="#64748b" fontSize={11} tickLine={false} axisLine={false} />
-                  <YAxis stroke="#64748b" fontSize={11} tickLine={false} axisLine={false} unit="%" />
-                  <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 8, fontSize: 12 }} labelStyle={{ color: "#e2e8f0" }} />
-                  <Bar dataKey="pct" fill="#2dd4bf" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
+              {eventBreakdown.length === 0 ? (
+                <div className="h-full flex items-center justify-center text-sm text-slate-500">
+                  No events logged yet — this chart fills in as actions happen.
+                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={eventBreakdown}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
+                    <XAxis dataKey="name" stroke="#64748b" fontSize={10} tickLine={false} axisLine={false} />
+                    <YAxis stroke="#64748b" fontSize={11} tickLine={false} axisLine={false} allowDecimals={false} />
+                    <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 8, fontSize: 12 }} labelStyle={{ color: "#e2e8f0" }} />
+                    <Bar dataKey="count" fill="#2dd4bf" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
             </div>
           </section>
         </div>
