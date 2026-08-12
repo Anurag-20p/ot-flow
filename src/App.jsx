@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { createClient } from "@supabase/supabase-js";
 import {
   Activity, AlertTriangle, CheckCircle2, Clock, Package,
-  FileWarning, ShieldCheck, ChevronRight, X, Radio, RefreshCw, WifiOff,
+  FileWarning, ShieldCheck, ChevronRight, X, Radio, RefreshCw, WifiOff, ScrollText,
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip, CartesianGrid } from "recharts";
 
@@ -123,6 +123,7 @@ export default function App() {
   const [connectionError, setConnectionError] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [lastSync, setLastSync] = useState(null);
+  const [log, setLog] = useState([]);
 
   const loadAll = useCallback(async () => {
     const [roomsRes, patientsRes, packsRes] = await Promise.all([
@@ -144,9 +145,27 @@ export default function App() {
     setLoading(false);
   }, []);
 
+  const loadLog = useCallback(async () => {
+    const { data, error } = await supabase
+      .from("activity_log")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(25);
+    if (!error) setLog(data);
+  }, []);
+
+  // Writes an entry to the audit trail — this is what makes workflow events
+  // traceable and correlatable across departments instead of disappearing
+  // once the alert clears on screen.
+  const logActivity = useCallback(async (message, category = "info") => {
+    await supabase.from("activity_log").insert({ message, category });
+    loadLog();
+  }, [loadLog]);
+
   useEffect(() => {
     loadAll();
-  }, [loadAll]);
+    loadLog();
+  }, [loadAll, loadLog]);
 
   // Live real-time sync — auto-refresh when data changes in Supabase
   // (e.g. from another user's browser, or a script updating the DB)
@@ -156,9 +175,10 @@ export default function App() {
       .on("postgres_changes", { event: "*", schema: "public", table: "ot_rooms" }, loadAll)
       .on("postgres_changes", { event: "*", schema: "public", table: "patients" }, loadAll)
       .on("postgres_changes", { event: "*", schema: "public", table: "sterile_packs" }, loadAll)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "activity_log" }, loadLog)
       .subscribe();
     return () => supabase.removeChannel(channel);
-  }, [loadAll]);
+  }, [loadAll, loadLog]);
 
   useEffect(() => {
     const t = setInterval(() => setClock(new Date()), 1000);
@@ -174,6 +194,7 @@ export default function App() {
     if (!error) {
       setRooms((rs) => rs.map((r) => (r.id === roomId ? { ...r, stage: newStage } : r)));
       setLastSync(new Date());
+      logActivity(`${roomId} moved to stage "${STAGES[newStage]}"`, "stage");
     }
     setSyncing(false);
   };
@@ -189,6 +210,7 @@ export default function App() {
     setPatients((ps) => ps.map((p) => (p.id === patientId ? { ...p, consent: newVal } : p)));
     setRooms((rs) => rs.map((r) => (r.id === patient.room_id ? { ...r, consent: newVal } : r)));
     setLastSync(new Date());
+    logActivity(`Consent ${newVal ? "signed" : "revoked"} for ${patient.name} (${patient.id})`, newVal ? "consent" : "warn");
     setSyncing(false);
   };
 
@@ -199,6 +221,7 @@ export default function App() {
     await supabase.from("patients").update({ ready: newVal }).eq("id", patientId);
     setPatients((ps) => ps.map((p) => (p.id === patientId ? { ...p, ready: newVal } : p)));
     setLastSync(new Date());
+    logActivity(`${patient.name} marked as ${newVal ? "ready" : "not ready"}`, "info");
     setSyncing(false);
   };
 
@@ -380,6 +403,26 @@ export default function App() {
             </div>
           </section>
         </div>
+
+        <section>
+          <Eyebrow>Activity Log · Audit Trail</Eyebrow>
+          <div className="bg-slate-900 border border-slate-800 rounded-lg mt-2 divide-y divide-slate-800 max-h-72 overflow-y-auto">
+            {log.length === 0 && (
+              <div className="px-4 py-6 text-center text-sm text-slate-500 flex flex-col items-center gap-2">
+                <ScrollText size={20} className="text-slate-500" />
+                No activity recorded yet — actions you take will appear here.
+              </div>
+            )}
+            {log.map((entry) => (
+              <div key={entry.id} className="px-4 py-2 flex items-center gap-3 text-sm">
+                <span className="font-mono text-[10px] text-slate-500 w-16 shrink-0">
+                  {new Date(entry.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                </span>
+                <span className="text-slate-300">{entry.message}</span>
+              </div>
+            ))}
+          </div>
+        </section>
 
         <footer className="text-center text-[11px] font-mono text-slate-600 pt-4 pb-8">
           Connected to Supabase · last synced {lastSync ? lastSync.toLocaleTimeString() : "—"}
