@@ -3,7 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import { Html5QrcodeScanner } from "html5-qrcode";
 import {
   Activity, AlertTriangle, CheckCircle2, Clock, Package,
-  FileWarning, ShieldCheck, ChevronRight, X, Radio, RefreshCw, WifiOff, ScrollText, QrCode, Camera,
+  FileWarning, ShieldCheck, ChevronRight, X, Radio, RefreshCw, WifiOff, ScrollText, QrCode, Camera, Download,
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip, CartesianGrid } from "recharts";
 
@@ -316,6 +316,42 @@ export default function App() {
 
   const utilNow = rooms.length ? Math.round((rooms.filter((r) => r.stage > 0 && r.stage < 4).length / rooms.length) * 100) : 0;
 
+  // Builds a CSV file client-side (summary stats + full activity log) and
+  // triggers a browser download — satisfies the "periodic utilization and
+  // performance reports" requirement without needing a server-side job.
+  const downloadReport = () => {
+    const now = new Date();
+    const esc = (s) => `"${String(s ?? "").replace(/"/g, '""')}"`;
+    const lines = [
+      "OT-Flow Workflow Report",
+      `Generated,${esc(now.toLocaleString())}`,
+      "",
+      "Summary",
+      `OT Utilization,${utilNow}%`,
+      `Active Bays,${rooms.length}`,
+      `Sterile Packs Ready,${packs.filter((p) => p.status === "sterile").length} of ${packs.length}`,
+      `Open Alerts,${alerts.length}`,
+      "",
+      "Current Alerts",
+      "Severity,Message",
+      ...alerts.map((a) => `${a.tone === "bad" ? "Critical" : "Warning"},${esc(a.text)}`),
+      "",
+      "Activity Log (most recent first)",
+      "Timestamp,Category,Message",
+      ...log.map((entry) => `${esc(new Date(entry.created_at).toLocaleString())},${esc(entry.category)},${esc(entry.message)}`),
+    ];
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `ot-flow-report-${now.toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    logActivity("Performance report exported (CSV)", "info");
+  };
+
   // Real chart, computed live from the activity_log table — no hardcoded numbers
   const eventBreakdown = useMemo(() => {
     const counts = {};
@@ -360,6 +396,12 @@ export default function App() {
           </div>
         </div>
         <div className="flex items-center gap-4">
+          <button
+            onClick={downloadReport}
+            className="text-[11px] font-mono flex items-center gap-1.5 px-3 py-1.5 rounded border border-slate-700 text-slate-300 hover:border-teal-400/50 hover:text-teal-300 transition-colors"
+          >
+            <Download size={13} /> Download Report
+          </button>
           <StatusPill tone="ok">
             {syncing ? <RefreshCw size={11} className="animate-spin" /> : <CheckCircle2 size={11} />} Live · Supabase
           </StatusPill>
