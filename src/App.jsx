@@ -3,7 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import { Html5QrcodeScanner } from "html5-qrcode";
 import {
   Activity, AlertTriangle, CheckCircle2, Clock, Package,
-  FileWarning, ShieldCheck, ChevronRight, X, Radio, RefreshCw, WifiOff, ScrollText, QrCode, Camera, Download,
+  FileWarning, ShieldCheck, ChevronRight, X, Radio, RefreshCw, WifiOff, ScrollText, QrCode, Camera, Download, LogOut, Lock,
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip, CartesianGrid } from "recharts";
 
@@ -162,9 +162,81 @@ function QRScannerModal({ onScan, onClose }) {
   );
 }
 
+// ---- Login screen ---------------------------------------------------
+
+function LoginScreen({ onSuccess }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    const { data, error: err } = await supabase.auth.signInWithPassword({ email, password });
+    setBusy(false);
+    if (err) {
+      setError(err.message);
+    } else {
+      onSuccess(data.session);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
+      <form onSubmit={handleSubmit} className="bg-slate-900 border border-slate-800 rounded-lg p-8 w-full max-w-sm">
+        <div className="flex items-center gap-2 mb-1">
+          <div className="w-9 h-9 rounded bg-teal-400/10 border border-teal-400/30 flex items-center justify-center">
+            <Activity size={18} className="text-teal-400" />
+          </div>
+          <div className="text-lg font-semibold text-slate-100">OT-Flow</div>
+        </div>
+        <div className="text-xs font-mono text-slate-500 mb-6">Admin login required</div>
+
+        <label className="text-[11px] font-mono uppercase tracking-wide text-slate-500 mb-1 block">Email</label>
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          required
+          className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-slate-100 mb-4 outline-none focus:border-teal-400/50"
+          placeholder="admin@otflow.com"
+        />
+
+        <label className="text-[11px] font-mono uppercase tracking-wide text-slate-500 mb-1 block">Password</label>
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          required
+          className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-slate-100 mb-4 outline-none focus:border-teal-400/50"
+          placeholder="••••••••"
+        />
+
+        {error && (
+          <div className="text-[11px] text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded px-2 py-1.5 mb-4">
+            {error}
+          </div>
+        )}
+
+        <button
+          type="submit"
+          disabled={busy}
+          className="w-full bg-teal-400/10 border border-teal-400/30 text-teal-300 rounded py-2 text-sm font-mono flex items-center justify-center gap-2 hover:bg-teal-400/20 transition-colors disabled:opacity-50"
+        >
+          <Lock size={14} /> {busy ? "Signing in..." : "Sign In"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
 // ---- Main app -----------------------------------------------------
 
 export default function App() {
+  const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [rooms, setRooms] = useState([]);
   const [patients, setPatients] = useState([]);
   const [packs, setPacks] = useState([]);
@@ -213,6 +285,17 @@ export default function App() {
     await supabase.from("activity_log").insert({ message, category });
     loadLog();
   }, [loadLog]);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setAuthLoading(false);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
 
   useEffect(() => {
     loadAll();
@@ -362,6 +445,18 @@ export default function App() {
     return Object.entries(counts).map(([name, count]) => ({ name, count }));
   }, [log]);
 
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center gap-2 font-mono text-sm">
+        <RefreshCw size={16} className="animate-spin" /> Checking session...
+      </div>
+    );
+  }
+
+  if (!session) {
+    return <LoginScreen onSuccess={setSession} />;
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center gap-2 font-mono text-sm">
@@ -405,6 +500,13 @@ export default function App() {
           <StatusPill tone="ok">
             {syncing ? <RefreshCw size={11} className="animate-spin" /> : <CheckCircle2 size={11} />} Live · Supabase
           </StatusPill>
+          <button
+            onClick={() => supabase.auth.signOut()}
+            className="text-slate-500 hover:text-rose-300 transition-colors"
+            title="Sign out"
+          >
+            <LogOut size={16} />
+          </button>
           <div className="text-right">
             <div className="font-mono text-sm text-slate-300">{clock.toLocaleTimeString()}</div>
             <div className="text-[11px] text-slate-500">{clock.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "short" })}</div>
